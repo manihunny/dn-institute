@@ -273,6 +273,10 @@ class FeedValidator:
         seen = self._by_natural_key.get(trade.natural_key)
         if seen is not None:
             if seen.payload == trade.payload:
+                # Reserve the duplicate's event_id too, so it cannot later be reused
+                # for a different trade and end up in both quarantine and clean output.
+                self._by_event_id[trade.event_id] = trade
+                heapq.heappush(self._expiry, (trade.block_time, next(self._sequence), trade))
                 return Outcome(row, raw, Disposition.DUPLICATE, trade, Reason.DUPLICATE_TRADE,
                                f"same trade as {seen.event_id} under a new event_id")
             return Outcome(row, raw, Disposition.DEAD_LETTER, trade, Reason.CONFLICTING_TRADE,

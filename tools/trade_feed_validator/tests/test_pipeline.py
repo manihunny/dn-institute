@@ -59,6 +59,25 @@ class PipelineTest(unittest.TestCase):
         self.assertFalse((self.out / "clean_trades.csv").exists())
         self.assertTrue((self.out / "quarantine.csv").exists())
 
+    def test_failed_quality_gate_removes_stale_clean_output(self):
+        self.assertEqual(self.run_main(SAMPLE, "--feed-date", "2026-01-01")[0], 0)
+        self.assertTrue((self.out / "clean_trades.csv").exists())
+        code, _, _ = self.run_main(SAMPLE, "--feed-date", "2026-01-01", "--max-dead-letter-rate", "0.1")
+        self.assertEqual(code, 2)
+        self.assertFalse((self.out / "clean_trades.csv").exists())
+
+    def test_invalid_dedup_horizon_is_rejected(self):
+        for value in ("-1", "nan", "inf"):
+            with self.subTest(value=value), self.assertRaises(SystemExit):
+                self.run_main(SAMPLE, "--feed-date", "2026-01-01", "--dedup-horizon-hours", value)
+
+    def test_invalid_utf8_fails_with_exit_code_1(self):
+        feed = self.out / "latin1.csv"
+        feed.write_bytes(SAMPLE.read_bytes().replace("…".encode("utf-8"), b"\xe9"))
+        code, _, stderr = self.run_main(feed, "--feed-date", "2026-01-01")
+        self.assertEqual(code, 1)
+        self.assertIn("error:", stderr)
+
     def test_quality_gate_rejects_invalid_threshold(self):
         for value in ("1.5", "-0.1", "nan"):
             with self.subTest(value=value), self.assertRaises(SystemExit):
@@ -73,14 +92,14 @@ class PipelineTest(unittest.TestCase):
         feed.write_text(
             "event_id,tx_hash,block_time,wallet,side,amount,ingested_at,venue\n"
             "evt_1,0xaa1,09:00:00,0xd4,BUY,10,09:00:01,dex\n"
-            "evt_2,0xaa2,09:00:05,0xd4,BUY,10,09:00:06,dex,surplus\n",
+            "evt_2,0xaa2,09:00:05,0xd4,BUY,10,09:00:06,dex,a|b,c\n",
             encoding="utf-8",
         )
         code, _, _ = self.run_main(feed, "--feed-date", "2026-01-01")
         self.assertEqual(code, 0)
         [row] = read_csv(self.out / "quarantine.csv")
         self.assertEqual((row["event_id"], row["reason"]), ("evt_2", "malformed_row"))
-        self.assertEqual((row["raw_venue"], row["raw_extra"]), ("dex", "surplus"))
+        self.assertEqual((row["raw_venue"], row["raw_extra"]), ("dex", '["a|b", "c"]'))
 
     def test_broken_schema_fails_fast(self):
         broken = self.out / "broken.csv"

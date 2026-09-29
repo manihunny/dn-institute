@@ -14,6 +14,8 @@ from __future__ import annotations
 
 import argparse
 import csv
+import json
+import math
 import sys
 from collections import defaultdict
 from datetime import date, timedelta
@@ -81,7 +83,9 @@ def write_quarantine(path: Path, report: Report, raw_columns: List[str]) -> None
                 "detail": outcome.detail,
             }
             row.update({f"raw_{c}": outcome.raw.get(c) for c in raw_columns})
-            row["raw_extra"] = "|".join(outcome.raw.get(None) or ())
+            extra = outcome.raw.get(None)
+            # JSON keeps field boundaries even when a value contains a separator
+            row["raw_extra"] = json.dumps(extra, ensure_ascii=False) if extra else ""
             writer.writerow(row)
 
 
@@ -136,7 +140,7 @@ def print_report(rows: List[dict], report: Report) -> None:
 def run(input_path: Path, out_dir: Path, config: Config, max_dead_letter_rate: Optional[float] = None) -> int:
     try:
         rows, columns = read_feed(input_path)
-    except (OSError, SchemaError, csv.Error) as err:
+    except (OSError, SchemaError, csv.Error, UnicodeDecodeError) as err:
         print(f"error: {err}", file=sys.stderr)
         return 1
 
@@ -152,6 +156,8 @@ def run(input_path: Path, out_dir: Path, config: Config, max_dead_letter_rate: O
         # stop and page someone instead of publishing half of the day.
         print(f"quality gate failed: dead-letter rate {rate:.1%} > {max_dead_letter_rate:.1%}, "
               f"clean output not published", file=sys.stderr)
+        # A clean file left over from an earlier run would look like this run's output
+        (out_dir / "clean_trades.csv").unlink(missing_ok=True)
         return 2
 
     write_clean(out_dir / "clean_trades.csv", report)
@@ -166,6 +172,13 @@ def rate_fraction(value: str) -> float:
     return rate
 
 
+def non_negative_hours(value: str) -> float:
+    hours = float(value)
+    if not (math.isfinite(hours) and hours >= 0):
+        raise argparse.ArgumentTypeError(f"{value!r} is not a non-negative number of hours")
+    return hours
+
+
 def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("feed", type=Path, help="raw feed CSV")
@@ -178,7 +191,7 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
                         help="flag trades ingested later than this after block_time (default: 300)")
     parser.add_argument("--allowed-lateness-seconds", type=float, default=300,
                         help="flag trades older than the newest block_time minus this (default: 300)")
-    parser.add_argument("--dedup-horizon-hours", type=float, default=24,
+    parser.add_argument("--dedup-horizon-hours", type=non_negative_hours, default=24,
                         help="keep dedup state for this long by block_time, 0 keeps it forever (default: 24)")
     parser.add_argument("--strict-identifiers", action="store_true",
                         help="require full 20-byte addresses and 32-byte tx hashes")

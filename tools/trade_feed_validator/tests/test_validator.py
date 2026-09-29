@@ -207,6 +207,12 @@ class CrossRecordChecksTest(unittest.TestCase):
                 self.assertIs(report.outcomes[1].disposition, Disposition.DEAD_LETTER)
                 self.assertIs(report.outcomes[1].reason, Reason.TX_BLOCK_TIME_CONFLICT)
 
+    def test_event_id_of_a_duplicate_cannot_be_reused(self):
+        rows = [record(), record(event_id="evt_2"), record(event_id="evt_2", tx_hash=TX_B)]
+        report = validate(rows, CONFIG)
+        self.assertIs(report.outcomes[1].reason, Reason.DUPLICATE_TRADE)
+        self.assertIs(report.outcomes[2].reason, Reason.CONFLICTING_EVENT_ID)
+
     def test_address_case_does_not_hide_a_duplicate(self):
         report = validate([record(), record(event_id="evt_2", wallet=WALLET.upper().replace("0X", "0x"))], CONFIG)
         self.assertIs(report.outcomes[1].reason, Reason.DUPLICATE_TRADE)
