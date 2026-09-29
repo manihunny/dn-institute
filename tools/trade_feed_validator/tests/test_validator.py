@@ -7,6 +7,7 @@ from pathlib import Path
 from validator import (
     Config,
     Disposition,
+    FeedValidator,
     Flag,
     Reason,
     SchemaError,
@@ -167,6 +168,11 @@ class RecordChecksTest(unittest.TestCase):
             with self.subTest(value=value):
                 self.assertDeadLetter(self.single(log_index=value), Reason.INVALID_IDENTIFIER)
 
+    def test_row_with_more_fields_than_header_is_rejected(self):
+        raw = record()
+        raw[None] = ["surplus"]  # how csv.DictReader reports extra fields
+        self.assertDeadLetter(validate([raw], CONFIG).outcomes[0], Reason.MALFORMED_ROW)
+
     def test_missing_required_column_fails_the_whole_feed(self):
         with self.assertRaises(SchemaError):
             check_columns(["event_id", "tx_hash", "wallet", "side", "amount", "ingested_at"])
@@ -188,6 +194,14 @@ class CrossRecordChecksTest(unittest.TestCase):
         report = validate([record(), record(event_id="evt_2", side="SELL", block_time="09:00:12",
                                             ingested_at="09:00:15")], CONFIG)
         self.assertIs(report.outcomes[1].reason, Reason.TX_BLOCK_TIME_CONFLICT)
+
+    def test_block_time_conflict_is_not_hidden_by_deduplication(self):
+        moved = {"block_time": "09:00:12", "ingested_at": "09:00:15"}
+        for event_id, label in (("evt_2", "new event_id"), ("evt_1", "same event_id")):
+            with self.subTest(label):
+                report = validate([record(), record(event_id=event_id, **moved)], CONFIG)
+                self.assertIs(report.outcomes[1].disposition, Disposition.DEAD_LETTER)
+                self.assertIs(report.outcomes[1].reason, Reason.TX_BLOCK_TIME_CONFLICT)
 
     def test_address_case_does_not_hide_a_duplicate(self):
         report = validate([record(), record(event_id="evt_2", wallet=WALLET.upper().replace("0X", "0x"))], CONFIG)
@@ -223,6 +237,31 @@ class CrossRecordChecksTest(unittest.TestCase):
         old = validate(rows, CONFIG).outcomes[1]
         self.assertIs(old.disposition, Disposition.ACCEPTED)
         self.assertEqual(set(old.flags), {Flag.LATE_ARRIVAL, Flag.HIGH_INGESTION_LAG})
+
+
+class DedupHorizonTest(unittest.TestCase):
+    def trade_at(self, hour, event_id, tx_hash=TX_A):
+        stamp = f"2026-01-01T{hour:02d}:00:00Z"
+        return record(event_id=event_id, tx_hash=tx_hash, block_time=stamp, ingested_at=stamp)
+
+    def test_state_is_bounded_by_horizon(self):
+        config = Config(dedup_horizon=timedelta(hours=2))
+        validator = FeedValidator(config)
+        for hour in range(10):
+            validator.process(hour + 1, self.trade_at(hour, f"evt_{hour}", tx_hash="0x%064x" % hour))
+        # hours 7, 8, 9 are within two hours of the newest trade at 09:00
+        self.assertEqual(validator.state_size, 3)
+
+    def test_record_older_than_horizon_is_dead_lettered(self):
+        config = Config(dedup_horizon=timedelta(hours=2))
+        report = validate([self.trade_at(0, "evt_1"), self.trade_at(5, "evt_2", TX_B), self.trade_at(0, "evt_1")], config)
+        self.assertIs(report.outcomes[2].disposition, Disposition.DEAD_LETTER)
+        self.assertIs(report.outcomes[2].reason, Reason.OUTSIDE_DEDUP_HORIZON)
+
+    def test_no_horizon_keeps_everything(self):
+        report = validate([self.trade_at(0, "evt_1"), self.trade_at(20, "evt_2", TX_B), self.trade_at(0, "evt_1")],
+                          Config(dedup_horizon=None))
+        self.assertIs(report.outcomes[2].reason, Reason.DUPLICATE_EVENT_ID)
 
 
 if __name__ == "__main__":

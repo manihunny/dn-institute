@@ -12,6 +12,8 @@ consistency checks, so the same code works for a CSV file and for a live consume
 
 from __future__ import annotations
 
+import heapq
+import itertools
 import re
 from collections import Counter
 from dataclasses import dataclass
@@ -35,6 +37,7 @@ class Disposition(str, Enum):
 
 
 class Reason(str, Enum):
+    MALFORMED_ROW = "malformed_row"
     MISSING_FIELD = "missing_field"
     INVALID_TIMESTAMP = "invalid_timestamp"
     INVALID_SIDE = "invalid_side"
@@ -45,6 +48,7 @@ class Reason(str, Enum):
     CONFLICTING_EVENT_ID = "conflicting_event_id"
     DUPLICATE_TRADE = "duplicate_trade"
     TX_BLOCK_TIME_CONFLICT = "tx_block_time_conflict"
+    OUTSIDE_DEDUP_HORIZON = "outside_dedup_horizon"
 
 
 class Flag(str, Enum):
@@ -78,6 +82,10 @@ class Config:
     # Enforce full EVM identifiers. Off by default only because the sample feed
     # uses shortened addresses and hashes.
     strict_identifiers: bool = False
+    # Dedup state is kept only for trades within this distance of the newest
+    # block_time, so a long-running consumer uses bounded memory. Older records
+    # cannot be checked for duplicates and are dead-lettered. None keeps everything.
+    dedup_horizon: Optional[timedelta] = timedelta(hours=24)
 
 
 @dataclass(frozen=True)
@@ -151,6 +159,11 @@ def parse_timestamp(value: str, name: str, feed_date: Optional[date]) -> datetim
 
 def parse_record(raw: Mapping[str, Optional[str]], config: Config) -> Trade:
     """Stateless checks: types, nulls, enums, ranges and per-record invariants."""
+    # csv.DictReader puts surplus fields under the None key: the row does not match
+    # the header, so any field may be shifted and none of them can be trusted.
+    if raw.get(None):
+        raise RecordError(Reason.MALFORMED_ROW, f"{len(raw[None])} more field(s) than the header")
+
     values = {column: _clean(raw.get(column)) for column in REQUIRED_COLUMNS + OPTIONAL_COLUMNS}
 
     missing = [c for c in REQUIRED_COLUMNS if values[c] is None]
@@ -216,12 +229,27 @@ class FeedValidator:
         self._by_natural_key: dict = {}
         self._tx_block_time: dict = {}
         self._watermark: Optional[datetime] = None
+        self._expiry: list = []  # heap of (block_time, sequence, trade)
+        self._sequence = itertools.count()
 
     def process(self, row: int, raw: Mapping[str, Optional[str]]) -> Outcome:
         try:
             trade = parse_record(raw, self.config)
         except RecordError as err:
             return Outcome(row, raw, Disposition.DEAD_LETTER, reason=err.reason, detail=err.detail)
+
+        horizon = self.config.dedup_horizon
+        if horizon is not None and self._watermark is not None and trade.block_time < self._watermark - horizon:
+            return Outcome(row, raw, Disposition.DEAD_LETTER, trade, Reason.OUTSIDE_DEDUP_HORIZON,
+                           f"block_time is more than {horizon} older than the newest trade, duplicates cannot be ruled out")
+
+        # Checked before deduplication: a copy of a known trade with another
+        # block_time is a reorg or a corrupted timestamp, not a harmless duplicate.
+        # One transaction lives in exactly one block, so a human or a chain lookup decides.
+        known_time = self._tx_block_time.get(trade.tx_hash)
+        if known_time is not None and known_time != trade.block_time:
+            return Outcome(row, raw, Disposition.DEAD_LETTER, trade, Reason.TX_BLOCK_TIME_CONFLICT,
+                           f"{trade.tx_hash} was already accepted with block_time {known_time:%Y-%m-%d %H:%M:%S}")
 
         # Rejected records never reach the state below, so a broken record cannot
         # cause a later valid copy of the same trade to be dropped as a duplicate.
@@ -238,13 +266,6 @@ class FeedValidator:
             return Outcome(row, raw, Disposition.DUPLICATE, trade, Reason.DUPLICATE_TRADE,
                            f"same trade as {seen.event_id} under a new event_id")
 
-        known_time = self._tx_block_time.get(trade.tx_hash)
-        if known_time is not None and known_time != trade.block_time:
-            # One transaction lives in exactly one block. A second block_time means a
-            # reorg or a corrupted timestamp; either way a human or a chain lookup decides.
-            return Outcome(row, raw, Disposition.DEAD_LETTER, trade, Reason.TX_BLOCK_TIME_CONFLICT,
-                           f"{trade.tx_hash} was already accepted with block_time {known_time:%Y-%m-%d %H:%M:%S}")
-
         flags = []
         if trade.ingested_at - trade.block_time > self.config.max_ingestion_lag:
             flags.append(Flag.HIGH_INGESTION_LAG)
@@ -255,7 +276,25 @@ class FeedValidator:
         self._by_natural_key[trade.natural_key] = trade
         self._tx_block_time[trade.tx_hash] = trade.block_time
         self._watermark = max(self._watermark or trade.block_time, trade.block_time)
+        heapq.heappush(self._expiry, (trade.block_time, next(self._sequence), trade))
+        self._evict()
         return Outcome(row, raw, Disposition.ACCEPTED, trade, flags=tuple(flags))
+
+    def _evict(self) -> None:
+        if self.config.dedup_horizon is None:
+            return
+        cutoff = self._watermark - self.config.dedup_horizon
+        while self._expiry and self._expiry[0][0] < cutoff:
+            trade = heapq.heappop(self._expiry)[2]
+            for index, key in ((self._by_event_id, trade.event_id), (self._by_natural_key, trade.natural_key)):
+                if index.get(key) is trade:
+                    del index[key]
+            if self._tx_block_time.get(trade.tx_hash) == trade.block_time:
+                del self._tx_block_time[trade.tx_hash]
+
+    @property
+    def state_size(self) -> int:
+        return len(self._by_event_id)
 
 
 @dataclass(frozen=True)

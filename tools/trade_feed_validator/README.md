@@ -53,29 +53,29 @@ trades/wallet:  {'0xd4…': 2, '0xe5…': 1, '0xf6…': 1}
 written:        out/clean_trades.csv, out/quarantine.csv
 ```
 
-Run `python pipeline.py --help` for all options (clock-skew tolerance, lag and lateness thresholds, strict identifier checks).
+Run `python pipeline.py --help` for all options (clock-skew tolerance, lag and lateness thresholds, dedup horizon, strict identifier checks).
 
 ## Files
 
 | File | Purpose |
 |---|---|
 | `sample_feed.csv` | The raw feed from the challenge, verbatim (`null` kept as a literal token, as it arrives). |
-| `validator.py` | Validation core: stateless record checks (`parse_record`) and stateful cross-record checks (`FeedValidator`). Streaming, so it works for a file or a live consumer. |
-| `pipeline.py` | CLI: reads CSV, runs the validator, writes `clean_trades.csv` / `quarantine.csv`, prints a summary, enforces the quality gate. |
+| `validator.py` | Validation core: stateless record checks (`parse_record`) and stateful cross-record checks (`FeedValidator`). Streaming, so it works for a file or a live consumer; dedup state is bounded by a 24 h horizon on `block_time` (`--dedup-horizon-hours`). |
+| `pipeline.py` | CLI: reads CSV, runs the validator, writes `clean_trades.csv` / `quarantine.csv`, prints a summary, enforces the quality gate. The quarantine keeps every raw column, including unknown ones and surplus fields, so a dead letter can be replayed as it arrived. |
 | `tests/` | `unittest` suite: one test per sample issue, plus edge cases that real feeds produce. |
 
 ## Data-quality issues in the sample
 
 | # | Issue | Rows | Handling |
 |---|---|---|---|
-| 1 | **Redelivery under a new `event_id`.** `evt_003` is the same trade as `evt_002` (tx `0xaa2`, same wallet, side, amount, block time) delivered again 2m38s later with a fresh `event_id`. Typical indexer retry after a timeout. Deduplicating on `event_id` does not catch it. | 2, 3 | Drop `evt_003` as `duplicate_trade`, keep the first copy. |
-| 2 | **Double emission.** `evt_007` repeats `evt_006` (tx `0xaa5`) with the *same* `ingested_at`, i.e. the indexer emitted one trade twice in the same batch (fan-out bug, two consumers on one partition, etc.). Same fix as #1, different root cause, worth its own alert. | 6, 7 | Drop `evt_007` as `duplicate_trade`. |
+| 1 | **Redelivery under a new `event_id`.** `evt_003` is the same trade as `evt_002` (tx `0xaa2`, same wallet, side, amount, block time) delivered again 2m38s later with a fresh `event_id`. The 2m38s gap fits a retry after a timeout, but the sample alone cannot prove the cause. Deduplicating on `event_id` does not catch it. | 2, 3 | Drop `evt_003` as `duplicate_trade`, keep the first copy. |
+| 2 | **Double emission.** `evt_007` repeats `evt_006` (tx `0xaa5`) with the *same* `ingested_at`: one trade emitted twice within the same second. Possible causes include a fan-out bug or two consumers on one partition; the sample does not tell which. Same fix as #1, but the different timing pattern is worth its own alert, since it may point to a different fault. | 6, 7 | Drop `evt_007` as `duplicate_trade`. |
 | 3 | **Missing `block_time`.** `evt_005` has `block_time = null`. The trade cannot be placed in time. A naive parser either fails, stores `NULL`, or stores the literal string `"null"`. | 5 | Dead-letter (`missing_field`). See [Handling evt_005](#handling-evt_005). |
 | 4 | **Impossible timestamps.** `evt_008` was "ingested" at 09:59:50, 10m10s *before* its block was produced at 10:10:00. Causality is violated, so at least one of the two timestamps is wrong (collector clock skew, a mislabeled/reorged block, or a field swap). This is far beyond NTP-scale skew. | 8 | Dead-letter (`ingested_before_block_time`). A 2 s tolerance (`--clock-skew-seconds`) absorbs honest clock skew. |
 | 5 | **Arrival order is not ingestion or chain order.** Row 8 arrives last but claims to have been ingested before rows 6 and 7, and a feed that promises "arrival order, not chain order" can deliver any block late. The current pipeline inserts in arrival order, so anything that relies on insert order (running totals, "last price", windows closed on arrival) is wrong. | 6-8 (and any late event) | Output is sorted by `(block_time, tx_hash, log_index, event_id)`. Trades older than the watermark minus `allowed_lateness` are flagged `late_arrival` so downstream can recompute already-published windows; ingestion lag over 5 min is flagged `high_ingestion_lag`. |
 | 6 | **Feed contract gaps** (not bad values, but they make some errors undetectable). Timestamps are time-only (the date must come from outside; midnight-crossing batches become ambiguous). No `log_index`, so two genuinely identical fills in one transaction cannot be told apart from a redelivery. No price or token/pool column, so VWAP cannot be computed from this feed at all. Identifiers are shortened. | all | Time-only values require an explicit `--feed-date`. If a `log_index` column is present it becomes part of the dedup key. `--strict-identifiers` enforces 20-byte addresses and 32-byte hashes on real feeds (off by default only because the sample is shortened). |
 
-Additional checks that do not fire on the sample but do on real feeds (all covered by tests): other null tokens (`""`, `NULL`, `None`, `NaN`, `n/a`), non-numeric / zero / negative / infinite amounts, unknown `side`, unparseable timestamps, ISO timestamps with time-zone offsets (normalised to UTC), mixed-case addresses (`0xAB…` and `0xab…` are the same wallet), the same `event_id` reused for a different trade (`conflicting_event_id`), one transaction reported with two block times (`tx_block_time_conflict`, a reorg signal), missing columns (whole feed rejected with exit code 1).
+Additional checks that do not fire on the sample but do on real feeds (all covered by tests): other null tokens (`""`, `NULL`, `None`, `NaN`, `n/a`), non-numeric / zero / negative / infinite amounts, unknown `side`, unparseable timestamps, ISO timestamps with time-zone offsets (normalised to UTC), mixed-case addresses (`0xAB…` and `0xab…` are the same wallet), the same `event_id` reused for a different trade (`conflicting_event_id`), one transaction reported with two block times (`tx_block_time_conflict`, a reorg signal, checked before deduplication so an otherwise identical copy cannot hide it), rows with more fields than the header (`malformed_row`), records older than the dedup horizon that can no longer be checked for duplicates (`outside_dedup_horizon`), missing columns (whole feed rejected with exit code 1).
 
 ## What each issue corrupts downstream
 

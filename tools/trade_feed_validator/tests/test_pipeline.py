@@ -61,6 +61,20 @@ class PipelineTest(unittest.TestCase):
         code, _, _ = self.run_main(SAMPLE, "--feed-date", "2026-01-01", "--max-dead-letter-rate", "0.25")
         self.assertEqual(code, 0)
 
+    def test_quarantine_keeps_every_raw_field_for_replay(self):
+        feed = self.out / "feed.csv"
+        feed.write_text(
+            "event_id,tx_hash,block_time,wallet,side,amount,ingested_at,venue\n"
+            "evt_1,0xaa1,09:00:00,0xd4,BUY,10,09:00:01,dex\n"
+            "evt_2,0xaa2,09:00:05,0xd4,BUY,10,09:00:06,dex,surplus\n",
+            encoding="utf-8",
+        )
+        code, _, _ = self.run_main(feed, "--feed-date", "2026-01-01")
+        self.assertEqual(code, 0)
+        [row] = read_csv(self.out / "quarantine.csv")
+        self.assertEqual((row["event_id"], row["reason"]), ("evt_2", "malformed_row"))
+        self.assertEqual((row["raw_venue"], row["raw_extra"]), ("dex", "surplus"))
+
     def test_broken_schema_fails_fast(self):
         broken = self.out / "broken.csv"
         broken.write_text("event_id,tx_hash,amount\nevt_1,0xaa1,10\n", encoding="utf-8")

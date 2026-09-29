@@ -19,11 +19,9 @@ from collections import defaultdict
 from datetime import date, timedelta
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
-from typing import Iterable, List, Optional
+from typing import Iterable, List, Optional, Tuple
 
 from validator import (
-    OPTIONAL_COLUMNS,
-    REQUIRED_COLUMNS,
     Config,
     Disposition,
     Report,
@@ -37,12 +35,12 @@ CLEAN_COLUMNS = ("event_id", "tx_hash", "log_index", "block_time", "wallet", "si
 QUARANTINE_COLUMNS = ("row", "event_id", "disposition", "reason", "detail")
 
 
-def read_feed(path: Path) -> List[dict]:
+def read_feed(path: Path) -> Tuple[List[dict], List[str]]:
     # utf-8-sig tolerates a BOM from spreadsheet exports
     with path.open(newline="", encoding="utf-8-sig") as handle:
         reader = csv.DictReader(handle)
         check_columns(reader.fieldnames)
-        return list(reader)
+        return list(reader), list(reader.fieldnames)
 
 
 def write_clean(path: Path, report: Report) -> None:
@@ -64,10 +62,13 @@ def write_clean(path: Path, report: Report) -> None:
             })
 
 
-def write_quarantine(path: Path, report: Report, raw_columns: Iterable[str]) -> None:
-    raw_columns = [c for c in raw_columns if c not in QUARANTINE_COLUMNS]
+def write_quarantine(path: Path, report: Report, raw_columns: List[str]) -> None:
+    # Every input column is kept, known or not, plus surplus fields of malformed
+    # rows, so a dead letter can be replayed exactly as it arrived.
     with path.open("w", newline="", encoding="utf-8") as handle:
-        writer = csv.DictWriter(handle, fieldnames=list(QUARANTINE_COLUMNS) + [f"raw_{c}" for c in raw_columns])
+        writer = csv.DictWriter(
+            handle, fieldnames=list(QUARANTINE_COLUMNS) + [f"raw_{c}" for c in raw_columns] + ["raw_extra"]
+        )
         writer.writeheader()
         for outcome in report.outcomes:
             if outcome.disposition is Disposition.ACCEPTED:
@@ -80,6 +81,7 @@ def write_quarantine(path: Path, report: Report, raw_columns: Iterable[str]) -> 
                 "detail": outcome.detail,
             }
             row.update({f"raw_{c}": outcome.raw.get(c) for c in raw_columns})
+            row["raw_extra"] = "|".join(outcome.raw.get(None) or ())
             writer.writerow(row)
 
 
@@ -134,7 +136,7 @@ def print_report(rows: List[dict], report: Report, out: Path) -> None:
 
 def run(input_path: Path, out_dir: Path, config: Config, max_dead_letter_rate: Optional[float] = None) -> int:
     try:
-        rows = read_feed(input_path)
+        rows, columns = read_feed(input_path)
     except (OSError, SchemaError, csv.Error) as err:
         print(f"error: {err}", file=sys.stderr)
         return 1
@@ -142,7 +144,7 @@ def run(input_path: Path, out_dir: Path, config: Config, max_dead_letter_rate: O
     report = validate(rows, config)
     out_dir.mkdir(parents=True, exist_ok=True)
     write_clean(out_dir / "clean_trades.csv", report)
-    write_quarantine(out_dir / "quarantine.csv", report, list(REQUIRED_COLUMNS + OPTIONAL_COLUMNS))
+    write_quarantine(out_dir / "quarantine.csv", report, columns)
     print_report(rows, report, out_dir)
 
     if max_dead_letter_rate is not None and rows:
@@ -167,6 +169,8 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
                         help="flag trades ingested later than this after block_time (default: 300)")
     parser.add_argument("--allowed-lateness-seconds", type=float, default=300,
                         help="flag trades older than the newest block_time minus this (default: 300)")
+    parser.add_argument("--dedup-horizon-hours", type=float, default=24,
+                        help="keep dedup state for this long by block_time, 0 keeps it forever (default: 24)")
     parser.add_argument("--strict-identifiers", action="store_true",
                         help="require full 20-byte addresses and 32-byte tx hashes")
     parser.add_argument("--max-dead-letter-rate", type=float,
@@ -182,6 +186,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         max_ingestion_lag=timedelta(seconds=args.max_lag_seconds),
         allowed_lateness=timedelta(seconds=args.allowed_lateness_seconds),
         strict_identifiers=args.strict_identifiers,
+        dedup_horizon=timedelta(hours=args.dedup_horizon_hours) if args.dedup_horizon_hours > 0 else None,
     )
     return run(args.feed, args.out_dir, config, args.max_dead_letter_rate)
 
