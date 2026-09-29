@@ -138,6 +138,11 @@ def print_report(rows: List[dict], report: Report) -> None:
 
 
 def run(input_path: Path, out_dir: Path, config: Config, max_dead_letter_rate: Optional[float] = None) -> int:
+    # Outputs of an earlier run are removed first, so whatever this run fails on,
+    # nobody can mistake stale files in a reused out_dir for its results.
+    for name in ("clean_trades.csv", "quarantine.csv"):
+        (out_dir / name).unlink(missing_ok=True)
+
     try:
         rows, columns = read_feed(input_path)
     except (OSError, SchemaError, csv.Error, UnicodeDecodeError) as err:
@@ -156,8 +161,6 @@ def run(input_path: Path, out_dir: Path, config: Config, max_dead_letter_rate: O
         # stop and page someone instead of publishing half of the day.
         print(f"quality gate failed: dead-letter rate {rate:.1%} > {max_dead_letter_rate:.1%}, "
               f"clean output not published", file=sys.stderr)
-        # A clean file left over from an earlier run would look like this run's output
-        (out_dir / "clean_trades.csv").unlink(missing_ok=True)
         return 2
 
     write_clean(out_dir / "clean_trades.csv", report)
@@ -172,11 +175,11 @@ def rate_fraction(value: str) -> float:
     return rate
 
 
-def non_negative_hours(value: str) -> float:
-    hours = float(value)
-    if not (math.isfinite(hours) and hours >= 0):
-        raise argparse.ArgumentTypeError(f"{value!r} is not a non-negative number of hours")
-    return hours
+def non_negative(value: str) -> float:
+    number = float(value)
+    if not (math.isfinite(number) and number >= 0):
+        raise argparse.ArgumentTypeError(f"{value!r} is not a finite non-negative number")
+    return number
 
 
 def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
@@ -185,13 +188,13 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
     parser.add_argument("--out-dir", type=Path, default=Path("out"), help="where to write results (default: out)")
     parser.add_argument("--feed-date", type=date.fromisoformat,
                         help="UTC date (YYYY-MM-DD) for feeds whose timestamps are time-only")
-    parser.add_argument("--clock-skew-seconds", type=float, default=2,
+    parser.add_argument("--clock-skew-seconds", type=non_negative, default=2,
                         help="how far ingested_at may precede block_time (default: 2)")
-    parser.add_argument("--max-lag-seconds", type=float, default=300,
+    parser.add_argument("--max-lag-seconds", type=non_negative, default=300,
                         help="flag trades ingested later than this after block_time (default: 300)")
-    parser.add_argument("--allowed-lateness-seconds", type=float, default=300,
+    parser.add_argument("--allowed-lateness-seconds", type=non_negative, default=300,
                         help="flag trades older than the newest block_time minus this (default: 300)")
-    parser.add_argument("--dedup-horizon-hours", type=non_negative_hours, default=24,
+    parser.add_argument("--dedup-horizon-hours", type=non_negative, default=24,
                         help="keep dedup state for this long by block_time, 0 keeps it forever (default: 24)")
     parser.add_argument("--strict-identifiers", action="store_true",
                         help="require full 20-byte addresses and 32-byte tx hashes")

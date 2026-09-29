@@ -66,10 +66,20 @@ class PipelineTest(unittest.TestCase):
         self.assertEqual(code, 2)
         self.assertFalse((self.out / "clean_trades.csv").exists())
 
-    def test_invalid_dedup_horizon_is_rejected(self):
-        for value in ("-1", "nan", "inf"):
-            with self.subTest(value=value), self.assertRaises(SystemExit):
-                self.run_main(SAMPLE, "--feed-date", "2026-01-01", "--dedup-horizon-hours", value)
+    def test_invalid_thresholds_are_rejected(self):
+        options = ("--dedup-horizon-hours", "--clock-skew-seconds", "--max-lag-seconds", "--allowed-lateness-seconds")
+        for option in options:
+            for value in ("-1", "nan", "inf"):
+                with self.subTest(option=option, value=value), self.assertRaises(SystemExit):
+                    self.run_main(SAMPLE, "--feed-date", "2026-01-01", option, value)
+
+    def test_failed_run_removes_stale_outputs(self):
+        self.assertEqual(self.run_main(SAMPLE, "--feed-date", "2026-01-01")[0], 0)
+        broken = self.out / "broken.csv"
+        broken.write_text("event_id,tx_hash,amount\nevt_1,0xaa1,10\n", encoding="utf-8")
+        self.assertEqual(self.run_main(broken, "--feed-date", "2026-01-01")[0], 1)
+        self.assertFalse((self.out / "clean_trades.csv").exists())
+        self.assertFalse((self.out / "quarantine.csv").exists())
 
     def test_invalid_utf8_fails_with_exit_code_1(self):
         feed = self.out / "latin1.csv"

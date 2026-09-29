@@ -129,7 +129,7 @@ class RecordChecksTest(unittest.TestCase):
         self.assertDeadLetter(validate([raw], CONFIG).outcomes[0], Reason.MISSING_FIELD)
 
     def test_invalid_amounts(self):
-        for amount in ("abc", "0", "-5", "Infinity", "sNaN", "1,000"):
+        for amount in ("abc", "0", "-5", "Infinity", "sNaN", "1,000", "1e999999999", str(2**256)):
             with self.subTest(amount=amount):
                 self.assertDeadLetter(self.single(amount=amount), Reason.INVALID_AMOUNT)
 

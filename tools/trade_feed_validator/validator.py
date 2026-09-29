@@ -26,6 +26,9 @@ REQUIRED_COLUMNS = ("event_id", "tx_hash", "block_time", "wallet", "side", "amou
 OPTIONAL_COLUMNS = ("log_index",)
 NULL_TOKENS = frozenset({"", "null", "none", "nan", "n/a"})
 SIDES = frozenset({"BUY", "SELL"})
+# On-chain amounts are uint256, anything larger is corrupted and would also
+# overflow Decimal arithmetic in downstream aggregates.
+MAX_AMOUNT = Decimal(2**256 - 1)
 EVM_ADDRESS = re.compile(r"^0x[0-9a-f]{40}$")
 EVM_TX_HASH = re.compile(r"^0x[0-9a-f]{64}$")
 
@@ -189,6 +192,8 @@ def parse_record(raw: Mapping[str, Optional[str]], config: Config) -> Trade:
         raise RecordError(Reason.INVALID_AMOUNT, f"amount={values['amount']!r} is not a number") from None
     if not amount.is_finite() or amount <= 0:
         raise RecordError(Reason.INVALID_AMOUNT, f"amount={values['amount']!r} must be a finite positive number")
+    if amount > MAX_AMOUNT:
+        raise RecordError(Reason.INVALID_AMOUNT, f"amount={values['amount']!r} exceeds the uint256 range")
 
     # EVM hex identifiers are case-insensitive (mixed case is only a checksum),
     # so "0xAB.." and "0xab.." must not become two different wallets.
