@@ -113,7 +113,7 @@ def summarize(trades: Iterable[Trade]) -> dict:
     }
 
 
-def print_report(rows: List[dict], report: Report, out: Path) -> None:
+def print_report(rows: List[dict], report: Report) -> None:
     accepted = report.accepted
     duplicates = report.with_disposition(Disposition.DUPLICATE)
     dead = report.with_disposition(Disposition.DEAD_LETTER)
@@ -131,7 +131,6 @@ def print_report(rows: List[dict], report: Report, out: Path) -> None:
     print(f"volume:         naive {naive_volume(rows)} -> clean {clean['volume']} "
           f"(buy {clean['buy_volume']}, sell {clean['sell_volume']})")
     print(f"trades/wallet:  {clean['trades_per_wallet']}")
-    print(f"written:        {out / 'clean_trades.csv'}, {out / 'quarantine.csv'}")
 
 
 def run(input_path: Path, out_dir: Path, config: Config, max_dead_letter_rate: Optional[float] = None) -> int:
@@ -142,19 +141,29 @@ def run(input_path: Path, out_dir: Path, config: Config, max_dead_letter_rate: O
         return 1
 
     report = validate(rows, config)
+    print_report(rows, report)
     out_dir.mkdir(parents=True, exist_ok=True)
-    write_clean(out_dir / "clean_trades.csv", report)
+    # The quarantine is written even when the gate fails: it is what people debug with.
     write_quarantine(out_dir / "quarantine.csv", report, columns)
-    print_report(rows, report, out_dir)
 
-    if max_dead_letter_rate is not None and rows:
-        rate = len(report.with_disposition(Disposition.DEAD_LETTER)) / len(rows)
-        if rate > max_dead_letter_rate:
-            # A spike of broken records usually means the upstream indexer is broken;
-            # stop and page someone instead of publishing half of the day.
-            print(f"quality gate failed: dead-letter rate {rate:.1%} > {max_dead_letter_rate:.1%}", file=sys.stderr)
-            return 2
+    rate = len(report.with_disposition(Disposition.DEAD_LETTER)) / len(rows) if rows else 0.0
+    if max_dead_letter_rate is not None and rate > max_dead_letter_rate:
+        # A spike of broken records usually means the upstream indexer is broken;
+        # stop and page someone instead of publishing half of the day.
+        print(f"quality gate failed: dead-letter rate {rate:.1%} > {max_dead_letter_rate:.1%}, "
+              f"clean output not published", file=sys.stderr)
+        return 2
+
+    write_clean(out_dir / "clean_trades.csv", report)
+    print(f"written:        {out_dir / 'clean_trades.csv'}, {out_dir / 'quarantine.csv'}")
     return 0
+
+
+def rate_fraction(value: str) -> float:
+    rate = float(value)
+    if not 0 <= rate <= 1:  # also rejects NaN, which would silently disable the gate
+        raise argparse.ArgumentTypeError(f"{value!r} is not a fraction between 0 and 1")
+    return rate
 
 
 def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
@@ -173,7 +182,7 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
                         help="keep dedup state for this long by block_time, 0 keeps it forever (default: 24)")
     parser.add_argument("--strict-identifiers", action="store_true",
                         help="require full 20-byte addresses and 32-byte tx hashes")
-    parser.add_argument("--max-dead-letter-rate", type=float,
+    parser.add_argument("--max-dead-letter-rate", type=rate_fraction,
                         help="fail with exit code 2 if the share of dead-lettered rows exceeds this (0..1)")
     return parser.parse_args(argv)
 

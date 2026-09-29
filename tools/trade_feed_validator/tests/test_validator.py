@@ -178,6 +178,10 @@ class RecordChecksTest(unittest.TestCase):
             check_columns(["event_id", "tx_hash", "wallet", "side", "amount", "ingested_at"])
         check_columns(list(record()))
 
+    def test_repeated_column_fails_the_whole_feed(self):
+        with self.assertRaises(SchemaError):
+            check_columns(list(record()) + ["amount"])
+
 
 class CrossRecordChecksTest(unittest.TestCase):
     def test_exact_redelivery_with_same_event_id(self):
@@ -205,6 +209,15 @@ class CrossRecordChecksTest(unittest.TestCase):
 
     def test_address_case_does_not_hide_a_duplicate(self):
         report = validate([record(), record(event_id="evt_2", wallet=WALLET.upper().replace("0X", "0x"))], CONFIG)
+        self.assertIs(report.outcomes[1].reason, Reason.DUPLICATE_TRADE)
+
+    def test_same_log_with_different_payload_is_dead_lettered(self):
+        report = validate([record(log_index="3"), record(event_id="evt_2", log_index="3", amount="999")], CONFIG)
+        self.assertIs(report.outcomes[1].disposition, Disposition.DEAD_LETTER)
+        self.assertIs(report.outcomes[1].reason, Reason.CONFLICTING_TRADE)
+
+    def test_same_log_redelivered_is_duplicate(self):
+        report = validate([record(log_index="3"), record(event_id="evt_2", log_index="3")], CONFIG)
         self.assertIs(report.outcomes[1].reason, Reason.DUPLICATE_TRADE)
 
     def test_log_index_keeps_identical_fills_in_one_transaction(self):

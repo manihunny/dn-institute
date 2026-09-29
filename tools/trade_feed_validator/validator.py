@@ -47,6 +47,7 @@ class Reason(str, Enum):
     DUPLICATE_EVENT_ID = "duplicate_event_id"
     CONFLICTING_EVENT_ID = "conflicting_event_id"
     DUPLICATE_TRADE = "duplicate_trade"
+    CONFLICTING_TRADE = "conflicting_trade"
     TX_BLOCK_TIME_CONFLICT = "tx_block_time_conflict"
     OUTSIDE_DEDUP_HORIZON = "outside_dedup_horizon"
 
@@ -101,9 +102,12 @@ class Trade:
 
     @property
     def natural_key(self) -> tuple:
-        # Without log_index two identical fills inside one transaction are
-        # indistinguishable from a redelivery, so they collapse into one trade.
-        return (self.tx_hash, self.log_index, self.wallet, self.side, self.amount)
+        # (tx_hash, log_index) identifies the emitted log on its own. Without it two
+        # identical fills inside one transaction are indistinguishable from a
+        # redelivery, so they collapse into one trade.
+        if self.log_index is not None:
+            return (self.tx_hash, self.log_index)
+        return (self.tx_hash, None, self.wallet, self.side, self.amount)
 
     @property
     def payload(self) -> tuple:
@@ -128,9 +132,14 @@ class Outcome:
 
 
 def check_columns(columns: Optional[Sequence[str]]) -> None:
-    missing = [c for c in REQUIRED_COLUMNS if c not in (columns or ())]
+    columns = list(columns or ())
+    missing = [c for c in REQUIRED_COLUMNS if c not in columns]
     if missing:
         raise SchemaError(f"feed is missing required columns: {', '.join(missing)}")
+    # DictReader keeps only the last of repeated names, silently dropping the others
+    repeated = sorted({c for c in columns if columns.count(c) > 1})
+    if repeated:
+        raise SchemaError(f"feed has repeated columns: {', '.join(repeated)}")
 
 
 def _clean(value: Optional[str]) -> Optional[str]:
@@ -263,8 +272,11 @@ class FeedValidator:
 
         seen = self._by_natural_key.get(trade.natural_key)
         if seen is not None:
-            return Outcome(row, raw, Disposition.DUPLICATE, trade, Reason.DUPLICATE_TRADE,
-                           f"same trade as {seen.event_id} under a new event_id")
+            if seen.payload == trade.payload:
+                return Outcome(row, raw, Disposition.DUPLICATE, trade, Reason.DUPLICATE_TRADE,
+                               f"same trade as {seen.event_id} under a new event_id")
+            return Outcome(row, raw, Disposition.DEAD_LETTER, trade, Reason.CONFLICTING_TRADE,
+                           f"same log as {seen.event_id} but a different payload")
 
         flags = []
         if trade.ingested_at - trade.block_time > self.config.max_ingestion_lag:

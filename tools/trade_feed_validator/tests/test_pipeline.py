@@ -56,6 +56,13 @@ class PipelineTest(unittest.TestCase):
         code, _, stderr = self.run_main(SAMPLE, "--feed-date", "2026-01-01", "--max-dead-letter-rate", "0.1")
         self.assertEqual(code, 2)
         self.assertIn("quality gate failed", stderr)
+        self.assertFalse((self.out / "clean_trades.csv").exists())
+        self.assertTrue((self.out / "quarantine.csv").exists())
+
+    def test_quality_gate_rejects_invalid_threshold(self):
+        for value in ("1.5", "-0.1", "nan"):
+            with self.subTest(value=value), self.assertRaises(SystemExit):
+                self.run_main(SAMPLE, "--feed-date", "2026-01-01", "--max-dead-letter-rate", value)
 
     def test_quality_gate_passes_under_threshold(self):
         code, _, _ = self.run_main(SAMPLE, "--feed-date", "2026-01-01", "--max-dead-letter-rate", "0.25")
