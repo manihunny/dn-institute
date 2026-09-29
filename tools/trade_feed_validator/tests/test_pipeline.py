@@ -111,6 +111,16 @@ class PipelineTest(unittest.TestCase):
         self.assertEqual((row["event_id"], row["reason"]), ("evt_2", "malformed_row"))
         self.assertEqual((row["raw_venue"], row["raw_extra"]), ("dex", '["a|b", "c"]'))
 
+    def test_extreme_amount_does_not_crash_reporting(self):
+        feed = self.out / "huge.csv"
+        feed.write_text(SAMPLE.read_text(encoding="utf-8") + "evt_009,0xaa7,10:20:00,0xF6,BUY,1e999999999,10:20:02\n",
+                        encoding="utf-8")
+        code, stdout, _ = self.run_main(feed, "--feed-date", "2026-01-01")
+        self.assertEqual(code, 0)
+        self.assertIn("naive 705000", stdout)
+        reasons = {r["event_id"]: r["reason"] for r in read_csv(self.out / "quarantine.csv")}
+        self.assertEqual(reasons["evt_009"], "invalid_amount")
+
     def test_broken_schema_fails_fast(self):
         broken = self.out / "broken.csv"
         broken.write_text("event_id,tx_hash,amount\nevt_1,0xaa1,10\n", encoding="utf-8")

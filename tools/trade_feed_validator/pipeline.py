@@ -19,7 +19,7 @@ import math
 import sys
 from collections import defaultdict
 from datetime import date, timedelta
-from decimal import Decimal, InvalidOperation
+from decimal import Decimal
 from pathlib import Path
 from typing import Iterable, List, Optional, Tuple
 
@@ -95,7 +95,8 @@ def naive_volume(rows: Iterable[dict]) -> Decimal:
     for raw in rows:
         try:
             total += Decimal((raw.get("amount") or "").strip())
-        except InvalidOperation:
+        # ArithmeticError also covers decimal.Overflow from exponents like 1e999999999
+        except ArithmeticError:
             continue
     return total
 

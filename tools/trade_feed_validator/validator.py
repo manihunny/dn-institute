@@ -26,8 +26,8 @@ REQUIRED_COLUMNS = ("event_id", "tx_hash", "block_time", "wallet", "side", "amou
 OPTIONAL_COLUMNS = ("log_index",)
 NULL_TOKENS = frozenset({"", "null", "none", "nan", "n/a"})
 SIDES = frozenset({"BUY", "SELL"})
-# On-chain amounts are uint256, anything larger is corrupted and would also
-# overflow Decimal arithmetic in downstream aggregates.
+# On-chain amounts are uint256, so anything larger cannot be a real transfer.
+# The bound also keeps absurd exponents like 1e999999999 out of aggregates.
 MAX_AMOUNT = Decimal(2**256 - 1)
 EVM_ADDRESS = re.compile(r"^0x[0-9a-f]{40}$")
 EVM_TX_HASH = re.compile(r"^0x[0-9a-f]{64}$")
