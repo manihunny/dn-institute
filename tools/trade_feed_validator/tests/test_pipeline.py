@@ -121,6 +121,14 @@ class PipelineTest(unittest.TestCase):
         reasons = {r["event_id"]: r["reason"] for r in read_csv(self.out / "quarantine.csv")}
         self.assertEqual(reasons["evt_009"], "invalid_amount")
 
+    def test_input_colliding_with_output_is_rejected(self):
+        colliding = self.out / "clean_trades.csv"
+        colliding.write_bytes(SAMPLE.read_bytes())
+        code, _, stderr = self.run_main(colliding, "--feed-date", "2026-01-01")
+        self.assertEqual(code, 1)
+        self.assertIn("collides", stderr)
+        self.assertTrue(colliding.exists())  # the input itself must survive
+
     def test_broken_schema_fails_fast(self):
         broken = self.out / "broken.csv"
         broken.write_text("event_id,tx_hash,amount\nevt_1,0xaa1,10\n", encoding="utf-8")

@@ -139,9 +139,14 @@ def print_report(rows: List[dict], report: Report) -> None:
 
 
 def run(input_path: Path, out_dir: Path, config: Config, max_dead_letter_rate: Optional[float] = None) -> int:
+    output_names = ("clean_trades.csv", "quarantine.csv")
+    if input_path.resolve() in {(out_dir / name).resolve() for name in output_names}:
+        print(f"error: input {input_path} collides with an output file in {out_dir}", file=sys.stderr)
+        return 1
+
     # Outputs of an earlier run are removed first, so whatever this run fails on,
     # nobody can mistake stale files in a reused out_dir for its results.
-    for name in ("clean_trades.csv", "quarantine.csv"):
+    for name in output_names:
         (out_dir / name).unlink(missing_ok=True)
 
     try:
