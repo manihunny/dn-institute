@@ -182,6 +182,10 @@ class RecordChecksTest(unittest.TestCase):
         with self.assertRaises(SchemaError):
             check_columns(list(record()) + ["amount"])
 
+    def test_reserved_column_name_fails_the_whole_feed(self):
+        with self.assertRaises(SchemaError):
+            check_columns(list(record()) + ["extra_fields"])
+
 
 class CrossRecordChecksTest(unittest.TestCase):
     def test_exact_redelivery_with_same_event_id(self):
@@ -229,6 +233,15 @@ class CrossRecordChecksTest(unittest.TestCase):
     def test_log_index_keeps_identical_fills_in_one_transaction(self):
         report = validate([record(log_index="3"), record(event_id="evt_2", log_index="7")], CONFIG)
         self.assertEqual([o.disposition for o in report.outcomes], [Disposition.ACCEPTED] * 2)
+
+    def test_mixed_log_index_presence_is_ambiguous(self):
+        report = validate([record(), record(event_id="evt_2", log_index="3")], CONFIG)
+        self.assertIs(report.outcomes[1].disposition, Disposition.DEAD_LETTER)
+        self.assertIs(report.outcomes[1].reason, Reason.AMBIGUOUS_LOG_INDEX)
+
+    def test_mixed_log_index_presence_regardless_of_order(self):
+        report = validate([record(log_index="3"), record(event_id="evt_2")], CONFIG)
+        self.assertIs(report.outcomes[1].reason, Reason.AMBIGUOUS_LOG_INDEX)
 
     def test_different_trades_in_same_transaction_are_kept(self):
         report = validate([record(), record(event_id="evt_2", side="SELL", amount="40")], CONFIG)

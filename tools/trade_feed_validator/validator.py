@@ -24,6 +24,9 @@ from typing import Iterable, Mapping, Optional, Sequence, Tuple
 
 REQUIRED_COLUMNS = ("event_id", "tx_hash", "block_time", "wallet", "side", "amount", "ingested_at")
 OPTIONAL_COLUMNS = ("log_index",)
+# Name the pipeline uses for a synthetic quarantine column holding surplus fields.
+# An input column with this exact name would collide with it and get overwritten.
+RESERVED_COLUMNS = ("extra_fields",)
 NULL_TOKENS = frozenset({"", "null", "none", "nan", "n/a"})
 SIDES = frozenset({"BUY", "SELL"})
 # On-chain amounts are uint256, so anything larger cannot be a real transfer.
@@ -52,6 +55,7 @@ class Reason(str, Enum):
     DUPLICATE_TRADE = "duplicate_trade"
     CONFLICTING_TRADE = "conflicting_trade"
     TX_BLOCK_TIME_CONFLICT = "tx_block_time_conflict"
+    AMBIGUOUS_LOG_INDEX = "ambiguous_log_index"
     OUTSIDE_DEDUP_HORIZON = "outside_dedup_horizon"
 
 
@@ -143,6 +147,9 @@ def check_columns(columns: Optional[Sequence[str]]) -> None:
     repeated = sorted({c for c in columns if columns.count(c) > 1})
     if repeated:
         raise SchemaError(f"feed has repeated columns: {', '.join(repeated)}")
+    reserved = sorted(c for c in columns if c in RESERVED_COLUMNS)
+    if reserved:
+        raise SchemaError(f"feed has column name(s) reserved for pipeline output: {', '.join(reserved)}")
 
 
 def _clean(value: Optional[str]) -> Optional[str]:
@@ -241,6 +248,7 @@ class FeedValidator:
         self.config = config
         self._by_event_id: dict = {}
         self._by_natural_key: dict = {}
+        self._by_tx_fields: dict = {}
         self._tx_block_time: dict = {}
         self._watermark: Optional[datetime] = None
         self._expiry: list = []  # heap of (block_time, sequence, trade)
@@ -287,6 +295,16 @@ class FeedValidator:
             return Outcome(row, raw, Disposition.DEAD_LETTER, trade, Reason.CONFLICTING_TRADE,
                            f"same log as {seen.event_id} but a different payload")
 
+        # log_index is optional per row, so the same fill can hash to two different
+        # natural keys depending on whether it carries one. Catch that case here,
+        # since neither key lookup above sees the other key's bucket.
+        tx_fields = (trade.tx_hash, trade.wallet, trade.side, trade.amount)
+        seen = self._by_tx_fields.get(tx_fields)
+        if seen is not None and (seen.log_index is None) != (trade.log_index is None):
+            return Outcome(row, raw, Disposition.DEAD_LETTER, trade, Reason.AMBIGUOUS_LOG_INDEX,
+                           f"same tx/wallet/side/amount as {seen.event_id}, but log_index is present on only one "
+                           f"of the two; cannot tell whether this is the same fill or a distinct one")
+
         flags = []
         if trade.ingested_at - trade.block_time > self.config.max_ingestion_lag:
             flags.append(Flag.HIGH_INGESTION_LAG)
@@ -295,6 +313,7 @@ class FeedValidator:
 
         self._by_event_id[trade.event_id] = trade
         self._by_natural_key[trade.natural_key] = trade
+        self._by_tx_fields[tx_fields] = trade
         self._tx_block_time[trade.tx_hash] = trade.block_time
         self._watermark = max(self._watermark or trade.block_time, trade.block_time)
         heapq.heappush(self._expiry, (trade.block_time, next(self._sequence), trade))
@@ -307,7 +326,9 @@ class FeedValidator:
         cutoff = self._watermark - self.config.dedup_horizon
         while self._expiry and self._expiry[0][0] < cutoff:
             trade = heapq.heappop(self._expiry)[2]
-            for index, key in ((self._by_event_id, trade.event_id), (self._by_natural_key, trade.natural_key)):
+            tx_fields = (trade.tx_hash, trade.wallet, trade.side, trade.amount)
+            for index, key in ((self._by_event_id, trade.event_id), (self._by_natural_key, trade.natural_key),
+                               (self._by_tx_fields, tx_fields)):
                 if index.get(key) is trade:
                     del index[key]
             if self._tx_block_time.get(trade.tx_hash) == trade.block_time:

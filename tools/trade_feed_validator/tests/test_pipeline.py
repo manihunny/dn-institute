@@ -109,7 +109,7 @@ class PipelineTest(unittest.TestCase):
         self.assertEqual(code, 0)
         [row] = read_csv(self.out / "quarantine.csv")
         self.assertEqual((row["event_id"], row["reason"]), ("evt_2", "malformed_row"))
-        self.assertEqual((row["raw_venue"], row["raw_extra"]), ("dex", '["a|b", "c"]'))
+        self.assertEqual((row["raw_venue"], row["extra_fields"]), ("dex", '["a|b", "c"]'))
 
     def test_extreme_amount_does_not_crash_reporting(self):
         feed = self.out / "huge.csv"

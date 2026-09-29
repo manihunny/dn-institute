@@ -69,7 +69,7 @@ def write_quarantine(path: Path, report: Report, raw_columns: List[str]) -> None
     # rows, so a dead letter can be replayed exactly as it arrived.
     with path.open("w", newline="", encoding="utf-8") as handle:
         writer = csv.DictWriter(
-            handle, fieldnames=list(QUARANTINE_COLUMNS) + [f"raw_{c}" for c in raw_columns] + ["raw_extra"]
+            handle, fieldnames=list(QUARANTINE_COLUMNS) + [f"raw_{c}" for c in raw_columns] + ["extra_fields"]
         )
         writer.writeheader()
         for outcome in report.outcomes:
@@ -85,7 +85,7 @@ def write_quarantine(path: Path, report: Report, raw_columns: List[str]) -> None
             row.update({f"raw_{c}": outcome.raw.get(c) for c in raw_columns})
             extra = outcome.raw.get(None)
             # JSON keeps field boundaries even when a value contains a separator
-            row["raw_extra"] = json.dumps(extra, ensure_ascii=False) if extra else ""
+            row["extra_fields"] = json.dumps(extra, ensure_ascii=False) if extra else ""
             writer.writerow(row)
 
 
